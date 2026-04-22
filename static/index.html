@@ -1,1 +1,198 @@
-  
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grocery Analytics App</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero compact-hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Receipt Intelligence</p>
+        <h1>Grocery Analytics App</h1>
+        <p class="hero-text">
+          Upload one or many grocery receipt PDFs, click <strong>Analyse</strong>, and turn raw receipts into yearly, monthly,
+          weekly, and item-level insights with shop-level analysis.
+        </p>
+      </div>
+      <div class="hero-panel">
+        <form id="upload-form" class="upload-card">
+          <label class="upload-dropzone" for="files">
+            <span class="upload-title">Drop PDF receipts here</span>
+            <span class="upload-subtitle">or click to choose multiple files</span>
+            <input id="files" name="files" type="file" accept=".pdf,application/pdf" multiple>
+          </label>
+          <div id="file-list" class="file-list">No files selected yet.</div>
+          <button id="analyse-button" type="submit">Analyse</button>
+        </form>
+      </div>
+    </header>
+
+    <main id="dashboard" class="dashboard hidden">
+      <div class="app-tabs" id="app-tabs">
+        <button class="app-tab is-active" data-panel="overview-panel">Overview</button>
+        <button class="app-tab" data-panel="spending-panel">Spending</button>
+        <button class="app-tab" data-panel="items-panel">Items</button>
+        <button class="app-tab" data-panel="insights-panel">Insights</button>
+      </div>
+
+      <section id="overview-panel" class="tab-panel is-active">
+        <section class="summary-grid" id="summary-grid"></section>
+        <section class="overview-grid">
+          <section class="panel slim-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Interesting Angles</p>
+                <h2>Shop and weekday patterns</h2>
+              </div>
+            </div>
+            <div class="mini-chart-stack">
+              <div id="weekday-chart" class="chart-card compact"></div>
+              <div id="store-chart" class="chart-card compact"></div>
+            </div>
+          </section>
+
+          <section class="panel slim-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Highlights</p>
+                <h2>What stands out</h2>
+              </div>
+            </div>
+            <div id="insights" class="insight-list"></div>
+          </section>
+        </section>
+      </section>
+
+      <section id="spending-panel" class="tab-panel">
+        <section class="panel tab-fill">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Spend Over Time</p>
+              <h2>Annual, monthly, and weekly spendings</h2>
+            </div>
+            <div class="period-tabs" id="spending-tabs">
+              <button class="tab is-active" data-period="annual">Annual</button>
+              <button class="tab" data-period="monthly">Monthly</button>
+              <button class="tab" data-period="weekly">Weekly</button>
+            </div>
+          </div>
+          <div id="spending-chart" class="chart-card tab-chart"></div>
+        </section>
+      </section>
+
+      <section id="items-panel" class="tab-panel">
+        <section class="panel tab-fill">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Item Analysis</p>
+              <h2>Amount, quantity, and average price by item</h2>
+            </div>
+            <div class="period-tabs" id="item-tabs">
+              <button class="tab is-active" data-period="annual">Annual</button>
+              <button class="tab" data-period="monthly">Monthly</button>
+              <button class="tab" data-period="weekly">Weekly</button>
+            </div>
+          </div>
+          <div class="item-toolbar">
+            <label>
+              Period
+              <select id="item-period-select"></select>
+            </label>
+          </div>
+          <div class="items-layout">
+            <div id="item-chart" class="chart-card items-chart"></div>
+            <div class="table-wrap items-table-wrap">
+              <table id="item-table">
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th>Amount</th>
+                    <th>Quantity</th>
+                    <th>Avg price</th>
+                    <th>Purchases</th>
+                    <th>Savings</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="insights-panel" class="tab-panel">
+        <section class="insights-grid">
+          <section class="panel slim-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Pricing</p>
+                <h2>Items with the biggest price movement</h2>
+              </div>
+            </div>
+            <div class="table-wrap insight-table-wrap">
+              <table id="price-trend-table">
+                <thead>
+                  <tr>
+                    <th>Item</th>
+                    <th>Min price</th>
+                    <th>Max price</th>
+                    <th>Latest price</th>
+                    <th>Volatility</th>
+                    <th>Observations</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel slim-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Receipts</p>
+                <h2>Largest baskets and shopping rhythm</h2>
+              </div>
+            </div>
+            <div class="table-wrap insight-table-wrap">
+              <table id="timeline-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Shop</th>
+                    <th>Amount</th>
+                    <th>Items</th>
+                    <th>Savings</th>
+                    <th>Source</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="warnings-panel" class="panel slim-panel hidden">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Parser Notes</p>
+              <h2>Warnings</h2>
+            </div>
+          </div>
+          <ul id="warnings-list" class="warning-list"></ul>
+        </section>
+      </section>
+    </main>
+
+    <section id="empty-state" class="empty-state">
+      <h2>No analysis yet</h2>
+      <p>Upload one or more Migros receipt PDFs to generate dashboards.</p>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
