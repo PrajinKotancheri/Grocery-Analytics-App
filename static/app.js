@@ -122,6 +122,9 @@ function renderDashboard() {
 
 function renderSummary() {
   const summary = state.result.summary;
+  const currencies = Array.isArray(summary.currencies) ? summary.currencies : [];
+  const documentTypes = Array.isArray(summary.document_types) ? summary.document_types : [];
+  const currencyLabel = summary.currency === "MIXED" ? currencies.join(", ") : (summary.currency || "-");
   const cards = [
     {
       label: "Total spend",
@@ -146,9 +149,15 @@ function renderSummary() {
     {
       label: "Savings found",
       value: currency(summary.total_savings),
-      note: "Discounts extracted from receipts",
+      note: `Discounts extracted from ${documentTypes.join(", ") || "documents"}`,
     },
   ];
+
+  cards.push({
+    label: "Currency",
+    value: currencyLabel || "-",
+    note: summary.currency === "MIXED" ? "Totals span multiple currencies" : "Detected document currency",
+  });
 
   summaryGrid.innerHTML = cards
     .map(
@@ -275,10 +284,10 @@ function renderExtras() {
           <td>${escapeHtml(row.date)}</td>
           <td>${escapeHtml(row.time)}</td>
           <td>${escapeHtml(row.store)}</td>
-          <td>${escapeHtml(currency(row.amount))}</td>
+          <td>${escapeHtml(currency(row.amount, row.currency))}</td>
           <td>${escapeHtml(number(row.items))}</td>
-          <td>${escapeHtml(currency(row.savings))}</td>
-          <td>${escapeHtml(row.source_file)}</td>
+          <td>${escapeHtml(currency(row.savings, row.currency))}</td>
+          <td>${escapeHtml(row.reference || row.source_file)}</td>
         </tr>
       `
     )
@@ -360,10 +369,15 @@ function renderMiniMetric(label, item, value, color) {
   `;
 }
 
-function currency(value) {
-  return new Intl.NumberFormat("en-CH", {
+function currency(value, explicitCurrency = null) {
+  const summaryCurrency = state.result?.summary?.currency || "CHF";
+  const currentCurrency = explicitCurrency || summaryCurrency;
+  if (!currentCurrency || currentCurrency === "MIXED") {
+    return `${number(value, 2)} mixed`;
+  }
+  return new Intl.NumberFormat(currentCurrency === "INR" ? "en-IN" : "en-CH", {
     style: "currency",
-    currency: "CHF",
+    currency: currentCurrency,
     maximumFractionDigits: 2,
   }).format(value || 0);
 }
