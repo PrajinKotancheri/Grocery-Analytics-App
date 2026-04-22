@@ -28,6 +28,45 @@ ITEM_PATTERN = re.compile(
 )
 TOTAL_PATTERN = re.compile(r"Total CHF\s+(?P<total>\d+(?:\.\d+)?)")
 DATE_TIME_PATTERN = re.compile(r"(?P<date>\d{2}\.\d{2}\.\d{4})\s+(?P<time>\d{2}:\d{2}(?::\d{2})?)")
+BLINKIT_FULL_ITEM_PATTERN = re.compile(
+    r"(?P<sr>\d+)\s+"
+    r"(?P<code>(?:\d+\s+){1,8})"
+    r"(?P<desc>.*?)\s+"
+    r"(?P<mrp>\d+\.\d{2,3})\s+"
+    r"(?P<discount>\d+\.\d{2,3})\s+"
+    r"(?P<qty>\d+(?:\.\d+)?)\s+"
+    r"(?P<taxable>\d+\.\d{2,3})\s+"
+    r"(?P<cgst_rate>\d+(?:\.\d+)?)\s+"
+    r"(?P<cgst>\d+\.\d{2,3})\s+"
+    r"(?P<sgst_rate>\d+(?:\.\d+)?)\s+"
+    r"(?P<sgst>\d+\.\d{2,3})\s+"
+    r"(?P<cess>\d+\.\d{2,3})\s+"
+    r"(?P<add_cess>\d+\.\d{2,3})\s+"
+    r"(?P<total>\d+\.\d{2,3})(?=\s+(?:- Delivery and other charges|\d+\s+\d|Total\b))"
+)
+BLINKIT_DELIVERY_PATTERN = re.compile(
+    r"- Delivery and other charges - - - "
+    r"(?P<taxable>\d+\.\d{2,3})\s+"
+    r"(?P<cgst_rate>\d+(?:\.\d+)?)\s+"
+    r"(?P<cgst>\d+\.\d{2,3})\s+"
+    r"(?P<sgst_rate>\d+(?:\.\d+)?)\s+"
+    r"(?P<sgst>\d+\.\d{2,3})\s+"
+    r"(?P<cess>\d+(?:\.\d+)?)\s+"
+    r"(?P<add_cess>\d+\.\d{2,3})\s+"
+    r"(?P<total>\d+\.\d{2,3})"
+)
+BLINKIT_HANDLING_PATTERN = re.compile(
+    r"(?P<sr>\d+)\s+(?P<hsn>\d+)\s+Handling charge\s+"
+    r"(?P<mrp>\d+\.\d{2,3})\s+"
+    r"(?P<discount>\d+(?:\.\d+)?)\s+"
+    r"(?P<qty>\d+(?:\.\d+)?)\s+"
+    r"(?P<taxable>\d+\.\d{2,3})\s+"
+    r"(?P<cgst_rate>\d+(?:\.\d+)?)\s+"
+    r"(?P<cgst>\d+\.\d{2,3})\s+"
+    r"(?P<sgst_rate>\d+(?:\.\d+)?)\s+"
+    r"(?P<sgst>\d+\.\d{2,3})\s+"
+    r"(?P<total>\d+\.\d{2,3})(?=\s+Total\b)"
+)
 
 
 @dataclass
@@ -38,6 +77,9 @@ class ReceiptItem:
     total: float
     savings: float
     tax_group: str
+    category: str = "product"
+    unit_price: float = 0.0
+    taxes: float = 0.0
 
 
 @dataclass
@@ -48,6 +90,9 @@ class Receipt:
     total: float
     savings_total: float
     items: list[ReceiptItem]
+    currency: str = "CHF"
+    document_type: str = "receipt"
+    reference: str = ""
 
 
 def parse_decimal(value: str | None) -> float:
@@ -59,6 +104,22 @@ def parse_decimal(value: str | None) -> float:
 def split_receipt_blocks(text: str) -> list[str]:
     parts = re.split(r"(?=GENOSSENSCHAFT MIGROS)", text)
     return [part.strip() for part in parts if "Artikelbezeichnung" in part and "Total CHF" in part]
+
+
+def split_blinkit_invoice_blocks(text: str) -> list[str]:
+    compact = re.sub(r"\s+", " ", text)
+    parts = re.split(r"(?=Tax Invoice Sold By)", compact)
+    return [part.strip() for part in parts if "Invoice Number" in part and "Order Id" in part and "Total" in part]
+
+
+def parse_blinkit_date(value: str) -> datetime | None:
+    normalized = value.replace(" ", "")
+    for fmt in ("%d-%b-%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(normalized, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def parse_receipt_block(block: str, source_file: str) -> Receipt | None:
@@ -118,6 +179,7 @@ def parse_receipt_block(block: str, source_file: str) -> Receipt | None:
                 total=parse_decimal(item_match.group("total")),
                 savings=parse_decimal(item_match.group("savings")),
                 tax_group=item_match.group("group"),
+                unit_price=parse_decimal(item_match.group("price")),
             )
         )
 
@@ -131,12 +193,136 @@ def parse_receipt_block(block: str, source_file: str) -> Receipt | None:
         total=total,
         savings_total=savings_total,
         items=items,
+        currency="CHF",
+        document_type="receipt",
+    )
+
+
+def extract_pdf_text(data: bytes) -> str:
+    reader = PdfReader(io.BytesIO(data))
+    return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+
+def parse_blinkit_invoice_block(block: str, source_file: str) -> Receipt | None:
+    compact = re.sub(r"\s+", " ", block).strip()
+
+    seller_match = re.search(r"Tax Invoice Sold By(?: / Seller)? (?P<seller>.*?)(?= GSTIN\s*:)", compact)
+    invoice_match = re.search(r"Invoice Number\s*:?\s*(?P<invoice>.*?)(?=\s+Invoice To\b)", compact)
+    order_match = re.search(r"Order Id\s*:\s*(?P<order>\S+)", compact)
+    date_match = re.search(r"Invoice Date\s*:\s*(?P<date>.*?)(?=\s+Place of Supply)", compact)
+    total_section_match = re.search(r"(?P<section>Total\b.*?)(?=\s+Amount in Words)", compact)
+
+    if not seller_match or not date_match or not total_section_match:
+        return None
+
+    seller = seller_match.group("seller").strip()
+    seller = re.sub(r"\s+", " ", seller)
+    seller = seller.replace(" / Seller", "").strip()
+    company_match = re.search(r"(?P<name>.*?Private Limited)", seller, flags=re.IGNORECASE)
+    if company_match:
+        seller = company_match.group("name").strip()
+
+    invoice_date = parse_blinkit_date(date_match.group("date"))
+    if invoice_date is None:
+        return None
+
+    total_numbers = re.findall(r"\d+\.\d{2,3}", total_section_match.group("section"))
+    if not total_numbers:
+        return None
+    total = parse_decimal(total_numbers[-1])
+
+    section_match = re.search(
+        r"(?:Sr\s*\.?\s*no.*?Total|Sr\.\s*no.*?Total)(?P<section>.*?)(?=\s+Amount in Words\b)",
+        compact,
+    )
+    section_text = section_match.group("section").strip() if section_match else ""
+    section_for_products = BLINKIT_DELIVERY_PATTERN.sub(" ", section_text)
+
+    items: list[ReceiptItem] = []
+    savings_total = 0.0
+
+    for match in BLINKIT_FULL_ITEM_PATTERN.finditer(section_for_products):
+        description = re.sub(r"\s+", " ", match.group("desc")).strip()
+        description = description.replace("( HSN -", "(HSN -").replace("( HSN -", "(HSN -")
+        discount = parse_decimal(match.group("discount"))
+        quantity = parse_decimal(match.group("qty"))
+        total_value = parse_decimal(match.group("total"))
+        unit_price = total_value / quantity if quantity else total_value
+        taxes = parse_decimal(match.group("cgst")) + parse_decimal(match.group("sgst"))
+
+        items.append(
+            ReceiptItem(
+                name=description,
+                quantity=quantity,
+                price=unit_price,
+                total=total_value,
+                savings=discount,
+                tax_group="GST",
+                category="product",
+                unit_price=unit_price,
+                taxes=taxes,
+            )
+        )
+        savings_total += discount
+
+    for match in BLINKIT_DELIVERY_PATTERN.finditer(section_text):
+        total_value = parse_decimal(match.group("total"))
+        taxes = parse_decimal(match.group("cgst")) + parse_decimal(match.group("sgst"))
+        items.append(
+            ReceiptItem(
+                name="Delivery and other charges",
+                quantity=1.0,
+                price=total_value,
+                total=total_value,
+                savings=0.0,
+                tax_group="GST",
+                category="fee",
+                unit_price=total_value,
+                taxes=taxes,
+            )
+        )
+
+    for match in BLINKIT_HANDLING_PATTERN.finditer(section_text):
+        total_value = parse_decimal(match.group("total"))
+        taxes = parse_decimal(match.group("cgst")) + parse_decimal(match.group("sgst"))
+        items.append(
+            ReceiptItem(
+                name="Handling charge",
+                quantity=parse_decimal(match.group("qty")),
+                price=total_value,
+                total=total_value,
+                savings=parse_decimal(match.group("discount")),
+                tax_group="GST",
+                category="fee",
+                unit_price=total_value,
+                taxes=taxes,
+            )
+        )
+
+    if not items:
+        return None
+
+    reference_parts = []
+    if invoice_match:
+        reference_parts.append(f"Invoice {invoice_match.group('invoice').strip()}")
+    if order_match:
+        reference_parts.append(f"Order {order_match.group('order').strip()}")
+
+    return Receipt(
+        source_file=source_file,
+        store=seller,
+        date=invoice_date,
+        total=total,
+        savings_total=round_money(savings_total),
+        items=items,
+        currency="INR",
+        document_type="invoice",
+        reference=" | ".join(reference_parts),
     )
 
 
 def parse_pdf_receipts(file_name: str, data: bytes) -> tuple[list[Receipt], list[str]]:
-    reader = PdfReader(io.BytesIO(data))
-    full_text = "\n".join((page.extract_text() or "") for page in reader.pages)
+    full_text = extract_pdf_text(data)
     blocks = split_receipt_blocks(full_text)
     receipts: list[Receipt] = []
     warnings: list[str] = []
@@ -152,6 +338,38 @@ def parse_pdf_receipts(file_name: str, data: bytes) -> tuple[list[Receipt], list
         warnings.append(f"{file_name}: no Migros receipt blocks were detected.")
 
     return receipts, warnings
+
+
+def parse_blinkit_invoices(file_name: str, data: bytes) -> tuple[list[Receipt], list[str]]:
+    full_text = extract_pdf_text(data)
+    blocks = split_blinkit_invoice_blocks(full_text)
+    receipts: list[Receipt] = []
+    warnings: list[str] = []
+
+    for index, block in enumerate(blocks, start=1):
+        receipt = parse_blinkit_invoice_block(block, file_name)
+        if receipt is None:
+            warnings.append(f"{file_name}: skipped invoice block {index} because it could not be parsed cleanly.")
+            continue
+        receipts.append(receipt)
+
+    if not blocks:
+        warnings.append(f"{file_name}: no invoice blocks were detected.")
+
+    return receipts, warnings
+
+
+def parse_uploaded_document(file_name: str, data: bytes) -> tuple[list[Receipt], list[str]]:
+    full_text = extract_pdf_text(data)
+    if "GENOSSENSCHAFT MIGROS" in full_text and "Artikelbezeichnung" in full_text:
+        return parse_pdf_receipts(file_name, data)
+    if "Tax Invoice" in full_text and "Order Id" in full_text and "Invoice Number" in full_text:
+        return parse_blinkit_invoices(file_name, data)
+
+    warnings = [
+        f"{file_name}: unsupported document format. This version currently understands Migros receipts and Blinkit-style invoices."
+    ]
+    return [], warnings
 
 
 def iso_week_label(date: datetime) -> str:
@@ -231,7 +449,9 @@ def group_items_by_period(receipts: Iterable[Receipt], period: str) -> list[dict
 
 
 def build_item_totals(receipts: Iterable[Receipt]) -> list[dict]:
-    totals: dict[str, dict] = defaultdict(lambda: {"amount": 0.0, "quantity": 0.0, "count": 0, "savings": 0.0})
+    totals: dict[str, dict] = defaultdict(
+        lambda: {"amount": 0.0, "quantity": 0.0, "count": 0, "savings": 0.0, "category": "product"}
+    )
     for receipt in receipts:
         for item in receipt.items:
             entry = totals[item.name]
@@ -239,6 +459,7 @@ def build_item_totals(receipts: Iterable[Receipt]) -> list[dict]:
             entry["quantity"] += item.quantity
             entry["count"] += 1
             entry["savings"] += item.savings
+            entry["category"] = item.category
 
     result = []
     for item_name, values in totals.items():
@@ -251,6 +472,7 @@ def build_item_totals(receipts: Iterable[Receipt]) -> list[dict]:
                 "avg_price": round_money(values["amount"] / quantity if quantity else 0.0),
                 "purchase_count": values["count"],
                 "savings": round_money(values["savings"]),
+                "category": values["category"],
             }
         )
 
@@ -259,14 +481,20 @@ def build_item_totals(receipts: Iterable[Receipt]) -> list[dict]:
 
 
 def build_store_breakdown(receipts: Iterable[Receipt]) -> list[dict]:
-    totals: dict[str, dict] = defaultdict(lambda: {"amount": 0.0, "receipts": 0})
+    totals: dict[str, dict] = defaultdict(lambda: {"amount": 0.0, "receipts": 0, "currency": ""})
     for receipt in receipts:
         entry = totals[receipt.store]
         entry["amount"] += receipt.total
         entry["receipts"] += 1
+        entry["currency"] = receipt.currency
 
     result = [
-        {"store": store, "amount": round_money(values["amount"]), "receipts": values["receipts"]}
+        {
+            "store": store,
+            "amount": round_money(values["amount"]),
+            "receipts": values["receipts"],
+            "currency": values["currency"],
+        }
         for store, values in totals.items()
     ]
     result.sort(key=lambda row: (-row["amount"], row["store"]))
@@ -296,6 +524,9 @@ def build_receipt_timeline(receipts: Iterable[Receipt]) -> list[dict]:
             "items": len(receipt.items),
             "savings": round_money(receipt.savings_total),
             "source_file": receipt.source_file,
+            "currency": receipt.currency,
+            "document_type": receipt.document_type,
+            "reference": receipt.reference,
         }
         for receipt in sorted(receipts, key=lambda item: item.date)
     ]
@@ -340,7 +571,7 @@ def build_insights(receipts: list[Receipt], item_totals: list[dict], monthly: li
                 "title": "Biggest basket",
                 "detail": (
                     f"{highest_basket.date.strftime('%d %b %Y')} at {highest_basket.store}: "
-                    f"CHF {round_money(highest_basket.total):.2f}"
+                    f"{highest_basket.currency} {round_money(highest_basket.total):.2f}"
                 ),
             }
         )
@@ -351,7 +582,7 @@ def build_insights(receipts: list[Receipt], item_totals: list[dict], monthly: li
         insights.append(
             {
                 "title": "Top spend item",
-                "detail": f"{top_spend['item']} drove CHF {top_spend['amount']:.2f} in spend.",
+                "detail": f"{top_spend['item']} drove {top_spend['amount']:.2f} in spend.",
             }
         )
         insights.append(
@@ -366,7 +597,7 @@ def build_insights(receipts: list[Receipt], item_totals: list[dict], monthly: li
         insights.append(
             {
                 "title": "Peak spending month",
-                "detail": f"{best_month['period']} reached CHF {best_month['amount']:.2f}.",
+                "detail": f"{best_month['period']} reached {best_month['amount']:.2f}.",
             }
         )
 
@@ -375,7 +606,7 @@ def build_insights(receipts: list[Receipt], item_totals: list[dict], monthly: li
         insights.append(
             {
                 "title": "Peak spending week",
-                "detail": f"{best_week['period']} reached CHF {best_week['amount']:.2f}.",
+                "detail": f"{best_week['period']} reached {best_week['amount']:.2f}.",
             }
         )
 
@@ -386,7 +617,7 @@ def analyze_receipts(uploaded_files: list[tuple[str, bytes]]) -> dict:
     receipts: list[Receipt] = []
     warnings: list[str] = []
     for file_name, data in uploaded_files:
-        parsed_receipts, parse_warnings = parse_pdf_receipts(file_name, data)
+        parsed_receipts, parse_warnings = parse_uploaded_document(file_name, data)
         receipts.extend(parsed_receipts)
         warnings.extend(parse_warnings)
 
@@ -396,6 +627,13 @@ def analyze_receipts(uploaded_files: list[tuple[str, bytes]]) -> dict:
     total_savings = sum(receipt.savings_total for receipt in receipts)
     total_items = sum(len(receipt.items) for receipt in receipts)
     average_basket = total_spend / len(receipts) if receipts else 0.0
+    currencies = sorted({receipt.currency for receipt in receipts})
+    document_types = sorted({receipt.document_type for receipt in receipts})
+
+    if len(currencies) > 1:
+        warnings.append(
+            "Multiple currencies were detected in the uploaded documents. Combined totals are shown for convenience, but they should not be interpreted as a real financial sum across currencies."
+        )
 
     annual = group_receipts_by_period(receipts, "annual")
     monthly = group_receipts_by_period(receipts, "monthly")
@@ -411,6 +649,9 @@ def analyze_receipts(uploaded_files: list[tuple[str, bytes]]) -> dict:
             "average_basket": round_money(average_basket),
             "period_start": receipts[0].date.strftime("%Y-%m-%d") if receipts else None,
             "period_end": receipts[-1].date.strftime("%Y-%m-%d") if receipts else None,
+            "currencies": currencies,
+            "currency": currencies[0] if len(currencies) == 1 else "MIXED",
+            "document_types": document_types,
         },
         "spending": {
             "annual": annual,
